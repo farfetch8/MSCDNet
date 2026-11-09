@@ -8,7 +8,7 @@ from basicsr.utils.registry import MODEL_REGISTRY
 
 
 @MODEL_REGISTRY.register()
-class FTModel2(SRModel):
+class MSCDNetModel(SRModel):
 
     def init_training_settings(self):
         self.net_g.train()
@@ -109,3 +109,8 @@ class FTModel2(SRModel):
             with torch.no_grad():
                 self.output = self.net_g(self.lq)
             self.net_g.train()
+
+
+@MODEL_REGISTRY.register()
+class FTModel2(MSCDNetModel):
+    pass

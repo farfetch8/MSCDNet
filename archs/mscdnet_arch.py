@@ -26,9 +26,9 @@ class Mix(nn.Module):
         return out
 
 
-class AttING(nn.Module):
+class AdaptiveAttentionEnhancement(nn.Module):
     def __init__(self, in_channels, channels, aae_variant='full'):
-        super(AttING, self).__init__()
+        super(AdaptiveAttentionEnhancement, self).__init__()
         if aae_variant not in ('full', 'no_norm', 'fixed_fusion'):
             raise ValueError(f'Unsupported AAE variant: {aae_variant}')
         self.aae_variant = aae_variant
@@ -104,7 +104,7 @@ class SimpleNetwork(nn.Module):
         self.dim = dim
         self.stage = 2
         self.in_proj = nn.Conv2d(3, dim, 1, 1, 0, bias=False)
-        self.enc = AttING(dim, dim, aae_variant=aae_variant)
+        self.enc = AdaptiveAttentionEnhancement(dim, dim, aae_variant=aae_variant)
         self.encoder_layers = nn.ModuleList([])
         dim_stage = dim
         for i in range(2):
@@ -529,10 +529,10 @@ class ChannelAttention(nn.Module):
         return x * y
 
 
-class TransformerBlock_Ours(nn.Module):
+class MultiScaleCrossAttentionFusion(nn.Module):
 
     def __init__(self, dim, num_heads=2, ffn_expansion_factor=2.66, bias=False, LayerNorm_type='WithBias'):
-        super(TransformerBlock_Ours, self).__init__()
+        super(MultiScaleCrossAttentionFusion, self).__init__()
         self.reduce_conv = nn.Conv2d(in_channels=32 + 16 + 8, out_channels=dim, kernel_size=1, stride=1, padding=0)
         self.conv1 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(3, dim, kernel_size=3, stride=1, padding=1)
@@ -666,7 +666,7 @@ class DetailRecoveryModuleV2(nn.Module):
 
 
 @ARCH_REGISTRY.register()
-class CoNet(nn.Module):
+class MSCDNet(nn.Module):
 
     def __init__(self,
                  input_resolution=256,
@@ -684,7 +684,7 @@ class CoNet(nn.Module):
         self.lut = SepLUT(
             input_resolution=256, n_vertices_3d=n_vertices_3d, n_vertices_2d=n_vertices_2d, n_vertices_1d=n_vertices_1d)
 
-        self.fusion = TransformerBlock_Ours(dim=8, num_heads=2, ffn_expansion_factor=2)
+        self.fusion = MultiScaleCrossAttentionFusion(dim=8, num_heads=2, ffn_expansion_factor=2)
         self.detail_recovery = DetailRecoveryModuleV2(channels=8)
         self.map = nn.Conv2d(8, 3, kernel_size=3, stride=1, padding=1)
 
@@ -699,5 +699,5 @@ class CoNet(nn.Module):
 
 
 @ARCH_REGISTRY.register()
-class MSCDNet(CoNet):
+class CoNet(MSCDNet):
     pass
