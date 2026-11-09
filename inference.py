@@ -48,7 +48,6 @@ def load_model(checkpoint_path: Path, device: torch.device, state_key: str):
 
 
 def read_image(path: Path) -> np.ndarray:
-    # imdecode/fromfile support Unicode paths on Windows.
     data = np.fromfile(path, dtype=np.uint8)
     image = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if image is None:
@@ -141,7 +140,6 @@ def main(argv=None) -> int:
                 if not ok:
                     raise OSError(f'Cannot encode output: {destination}')
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                # Exclusive creation protects existing results by default.
                 with destination.open('wb' if args.overwrite else 'xb') as stream:
                     stream.write(encoded.tobytes())
                 print(f'[{index}/{len(jobs)}] Saved {destination} ({result.shape[1]}x{result.shape[0]})', flush=True)

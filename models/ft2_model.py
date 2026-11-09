@@ -106,8 +106,6 @@ class FTModel2(SRModel):
                 self.output = self.net_g_ema(self.lq)
         else:
             self.net_g.eval()
-            # 在PyTorch中，self.net_g.eval()的作用是将模型切换至评估模式（evaluation mode），
-            # 主要影响具有不同训练和推理行为的层（如 Dropout 和 BatchNorm），确保其在测试或验证阶段的行为一致性。
             with torch.no_grad():
                 self.output = self.net_g(self.lq)
             self.net_g.train()

@@ -3,11 +3,8 @@ import torch.nn.functional as F
 import torchvision
 
 def pad_tensor(input,divide = 16):
-    # 这段代码定义了一个用于对张量进行填充（padding）的函数，使其尺寸（高度和宽度）能够被指定的数值（divide，默认为16）整除。
-    # 如果高度或宽度不能被divide整除，则填充需要的像素数：
 
     height_org, width_org = input.shape[2], input.shape[3]
-    # divide = 16
 
     if width_org % divide != 0 or height_org % divide != 0:
 

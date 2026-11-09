@@ -10,9 +10,6 @@ from basicsr.utils.registry import ARCH_REGISTRY
 from einops import rearrange
 from .utils import pad_tensor, pad_tensor_back
 
-"""
-自适应注意力增强模块替换原注意力增强模块,MSCAF模块替换RAM模块,加入DR模块
-"""
 
 
 class Mix(nn.Module):
@@ -40,7 +37,7 @@ class AttING(nn.Module):
         self.conv2_2 = nn.Conv2d(channels // 2, channels // 2, kernel_size=3, stride=1, padding=1, bias=False)
         self.instance = nn.InstanceNorm2d(channels // 2, affine=True)
 
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
         t = int(abs((math.log(channels, 2) + 1) / 2))
         k = t if t % 2 else t + 1
         self.conv1_2 = nn.Conv1d(1, 1, kernel_size=k, padding=int(k / 2), bias=False)
@@ -51,19 +48,16 @@ class AttING(nn.Module):
             nn.Conv2d(2, 1, 7, padding=7 // 2, bias=False), nn.Sigmoid()
         )
         if aae_variant == 'fixed_fusion':
-            # The two active calibration scalars match alpha/beta's parameter count.
             self.fusion_gain = nn.Parameter(torch.ones(1))
             self.fusion_bias = nn.Parameter(torch.zeros(1))
         else:
-            self.alpha = nn.Parameter(torch.ones(1))  # 初始化为1
-            self.beta = nn.Parameter(torch.zeros(1))  # 初始化为0
+            self.alpha = nn.Parameter(torch.ones(1))
+            self.beta = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        # 曝光特征归一化
         x1 = self.conv1_1(x)
-        x1, x2 = torch.chunk(x1, 2, dim=1)  # (B,8,256,256) --> (B,4,256,256) (B,4,256,256)
+        x1, x2 = torch.chunk(x1, 2, dim=1)
         if self.aae_variant == 'no_norm':
-            # Retain InstanceNorm's affine parameters, removing only its statistics.
             out_instance = x1 * self.instance.weight[None, :, None, None]
             out_instance = out_instance + self.instance.bias[None, :, None, None]
         else:
@@ -71,9 +65,8 @@ class AttING(nn.Module):
         out_identity = x2
         out1 = self.conv2_1(out_instance)
         out2 = self.conv2_2(out_identity)
-        xp = torch.cat((out1, out2), 1)  # (B,4,256,256) (B,4,256,256) --> (B,8,256,256)
+        xp = torch.cat((out1, out2), 1)
 
-        # FCAttention
         x = self.avg_pool(xp)
         x1 = self.conv1_2(x.squeeze(-1).transpose(-1, -2)).transpose(-1, -2)
         x2 = self.fc(x).squeeze(-1).transpose(-1, -2)
@@ -86,16 +79,14 @@ class AttING(nn.Module):
         out = self.sigmoid(out)
         ca_out = xp * out
 
-        # Spatial Attention
-        avg_out = torch.mean(xp, dim=1, keepdim=True)  # (B,1,H,W)
-        max_out, _ = torch.max(xp, dim=1, keepdim=True)  # (B,1,H,W)
-        concat = torch.cat([avg_out, max_out], dim=1)  # (B,2,H,W)
-        spatial_weight = self.spatial_att(concat)  # 关键新增步骤
+        avg_out = torch.mean(xp, dim=1, keepdim=True)
+        max_out, _ = torch.max(xp, dim=1, keepdim=True)
+        concat = torch.cat([avg_out, max_out], dim=1)
+        spatial_weight = self.spatial_att(concat)
         sa_out = spatial_weight * xp
 
-        # Trainable global mixture, or its fixed initialization with calibration.
         if self.aae_variant == 'fixed_fusion':
-            channel_ratio = math.e / (math.e + 1.0)  # softmax([1, 0])[0]
+            channel_ratio = math.e / (math.e + 1.0)
             fused_attn = self.fusion_gain * (
                 channel_ratio * ca_out + (1.0 - channel_ratio) * sa_out
             ) + self.fusion_bias
@@ -107,8 +98,6 @@ class AttING(nn.Module):
 
 
 class SimpleNetwork(nn.Module):
-    # 深度可分离卷积：当groups=in_channels=out_channels时，该层变为深度可分离卷积（Depthwise Convolution）。
-    # 深度可分离卷积以其显著降低的参数量与计算量，成为轻量化 CNN 设计的基石
 
     def __init__(self, dim=8, expand=2, aae_variant='full'):
         super().__init__()
@@ -145,38 +134,27 @@ class SimpleNetwork(nn.Module):
         return out:[b,c,h,w]
         """
         x, pad_left, pad_right, pad_top, pad_bottom = pad_tensor(x, divide=16)
-        fea = self.lrelu(self.in_proj(x))  # (B, 3, 256, 256) --> (B, 8, 256, 256)
-        fea = self.enc(fea)  # (B, 8, 256, 256) --> (B, 8, 256, 256)
+        fea = self.lrelu(self.in_proj(x))
+        fea = self.enc(fea)
         fea_encoder = []
         for (Conv1, Conv2, Conv3) in self.encoder_layers:
             fea_encoder.append(fea)
             fea = Conv3(self.lrelu(Conv2(self.lrelu(Conv1(fea)))))
-        #   (B, 8, 256, 256) --> (B, 16, 256, 256) --> (B, 16, 128, 128) --> (B, 16, 128, 128)
-        #   (B, 16, 128, 128) --> (B, 32, 128, 128) --> (B, 32, 64, 64) --> (B, 32, 64, 64)
-        #   fea_encoder:[(B, 8, 256, 256), (B, 16, 128, 128)]
 
         fea_decoder = [fea]
         for i, (FeaUpSample, Conv1, Conv2, Conv3) in enumerate(self.decoder_layers):
             fea = FeaUpSample(fea)
             fea = Conv3(self.lrelu(Conv2(self.lrelu(Conv1(fea)))))
             fea = fea + fea_encoder[self.stage - 1 - i]
-            fea_decoder.append(fea)  # 保存解码后特征
-        #   (B, 32, 64, 64) --> (B, 16, 128, 128) --> (B, 32, 128, 128) --> (B, 32, 128, 128) --> (B, 16, 128, 128)
-        #   (B, 16, 128, 128) --> (B, 8, 256, 256) --> (B, 16, 256, 256) --> (B, 16, 256, 256) --> (B, 8, 256, 256)
-        #   fea_decoder:[(B, 32, 64, 64), (B, 16, 128, 128), (B, 8, 256, 256)]
+            fea_decoder.append(fea)
 
-        out = self.out_conv2(fea)  # (B, 8, 256, 256) --> (B, 3, 256, 256)
+        out = self.out_conv2(fea)
         out_feature = pad_tensor_back(fea, pad_left, pad_right, pad_top, pad_bottom)
         out = pad_tensor_back(out, pad_left, pad_right, pad_top, pad_bottom)
         return out, out_feature, fea_decoder
 
 
 class MySampler(nn.Module):
-    # 1.原始图像通过双线性下采样将图像分辨率变为256*256，通过LightBackbone提取特征
-    # 2.将特征向量转换为两个方向上的间隔参数，每个方向有n_vertices-1个参数，通过softmax归一化后，用于生成顶点位置，进而构建采样网格
-    # 每个方向的间隔参数和为1，保证累积后不超过1
-    # 3.生成顶点坐标，每个方向有n_vertices个顶点，范围[0,1]。生成网格点：meshgrid创建所有(x,y)组合，形状(n_vertices, n_vertices)
-    # 4.通过应用与图像内容相适应的采样网格G对原始图像进行下采样。
 
     def __init__(self, sampler_input_resolution=256, sampler_output_resolution=256):
         super().__init__()
@@ -215,9 +193,6 @@ class MySampler(nn.Module):
             yy = yy * 2 - 1
             grid_batch.append(torch.cat([yy, xx], dim=1).permute(0, 2, 3, 1))
         self.vertieces = vertieces
-        # 1.维度扩展：通过unsqueeze添加批次和通道维度，变为(1,1,H,W)
-        # 2.归一化：将[0,1]映射到[-1,1]，适配PyTorch的网格坐标要求。
-        # 3.拼接与置换：合并y和x坐标，调整维度顺序为(batch, H, W, 2)
         grid = torch.cat(grid_batch, dim=0)
         img_sampled = F.grid_sample(img, grid, mode='bilinear', align_corners=False, padding_mode='zeros')
         return img_sampled, grid
@@ -260,9 +235,7 @@ class LightBackbone(nn.Sequential):
 
     def forward(self, imgs):
         imgs = F.interpolate(imgs, size=(self.input_resolution,) * 2, mode='bilinear', align_corners=False)
-        # 将任意尺寸的输入图像 强制缩放到固定分辨率（如256x256）
         return super().forward(imgs).view(imgs.shape[0], -1)
-        # (1,256)
 
 
 class Res18Backbone(nn.Module):
@@ -288,11 +261,9 @@ class Res18Backbone(nn.Module):
 
 def lut_transform(imgs, luts):
     imgs = (imgs - .5) * 2.
-    grids = imgs.permute(0, 2, 3, 1).unsqueeze(1)  # (B, 3, H, W) --> (B, 1, H, W, 3)
+    grids = imgs.permute(0, 2, 3, 1).unsqueeze(1)
     outs = F.grid_sample(luts, grids, mode='bilinear', padding_mode='border', align_corners=True)
-    # 输入 LUT: (1, 3, 17, 17, 17)
-    # 采样网格: (B, 1, H, W, 3)，每个位置的 (r, g, b) 坐标对应 LUT 中的位置。
-    outs = outs.squeeze(2)  # 输出: (B, 3, 1, H, W)，通过 squeeze(2) 压缩为 (B, 3, H, W)。
+    outs = outs.squeeze(2)
     return outs
 
 
@@ -328,17 +299,6 @@ class LUT3DGenerator(nn.Module):
             *[torch.zeros(self.n_colors, *((self.n_vertices,) * self.n_colors)) for _ in range(self.n_ranks - 1)]
         ], dim=0).view(self.n_ranks, -1)
         self.basis_luts_bank.weight.data.copy_(identity_lut.t())
-        # 基础LUT数量：共3个，其中：
-        # 第1个：恒等LUT（归一化网格）。(3, 17, 17, 17)
-        # 第2-3个：全零张量（通过训练学习颜色变换）。(3, 17, 17, 17)
-        # 每个颜色通道需要一个独立的3D晶格，存储该通道的输出值。则一个3D LUT的参数量为3*(17^3)
-        # stack后变为(3, 3, 17, 17, 17)，view后(3, 14739)
-        # 全连接层 basis_luts_bank 的权重形状需要满足：权重形状=(输出维度, 输入维度),则需转置
-        # 转置前形状：(3, 14739)，表示3个基础LUT，每个基础LUT展开为14739维向量。转置后形状：(14739, 3)
-        # 复制到 basis_luts_bank 层的权重中，权重矩阵W：形状为 (14739, 3)。
-        # 输入：weights(3个基础LUT的权重，如 [w₁, w₂, w₃])。
-        # 全连接层的计算为：融合而成的3D LUT参数=W×weights=(14739×3)×(3×1)=(14739×1)
-        # reshape后(1,3,17,17,17)
 
     def forward(self, x):
         weights = self.weights_generator(x)
@@ -361,7 +321,6 @@ class LUT3DGenerator(nn.Module):
 
 @ARCH_REGISTRY.register()
 class SepLUT(nn.Module):
-    # 实现了一个名为SepLUT的神经网络模块，用于通过3D查找表（LUT）对图像进行自适应颜色变换。
 
     def __init__(self, n_ranks=3, n_vertices_3d=17, n_vertices_1d=0, n_vertices_2d=0,
                  backbone='light',
@@ -410,8 +369,6 @@ class SepLUT(nn.Module):
 
     def forward(self, imgs, origin_imgs):
         codes = self.backbone(imgs)
-        #  (B,3,256,256) --> (B,8,128,128) --> (B,16,64,64) --> (B,32,32,32)
-        #  --> (B,64,16,16) --> (B,64,8,8) --> (B,64,2,2) --> (B,256)
         if self.n_vertices_3d > 0:
             lut3d_weights, lut3d = self.lut3d_generator(codes)
             imgs = lut_transform(origin_imgs, lut3d)
@@ -421,7 +378,6 @@ class SepLUT(nn.Module):
         return outs
 
 
-## Layer Norm
 def to_3d(x):
     return rearrange(x, 'b c h w -> b (h w) c')
 
@@ -464,16 +420,11 @@ class WithBias_LayerNorm(nn.Module):
 
     def forward(self, x):
         mu = x.mean(-1, keepdim=True)
-        # 均值计算:(B, H*W, C) --> (B, H*W, 1)
         sigma = x.var(-1, keepdim=True, unbiased=False)
-        # 方差计算:(B, H*W, C) --> (B, H*W, 1)
         return (x - mu) / torch.sqrt(sigma + 1e-5) * self.weight + self.bias
-        # 归一化,仿射变换
 
 
 class LayerNorm(nn.Module):
-    # LayerNorm 是一个针对通道维度设计的归一化模块，通过手动计算均值和方差实现归一化，并支持可学习的仿射变换。
-    # 其核心在于适配图像Transformer架构中的形状转换需求，
 
     def __init__(self, dim, LayerNorm_type):
         super(LayerNorm, self).__init__()
@@ -487,8 +438,6 @@ class LayerNorm(nn.Module):
         return to_4d(self.body(to_3d(x)), h, w)
 
 
-##########################################################################
-## Gated-Dconv Feed-Forward Network (GDFN)
 class FeedForward(nn.Module):
 
     def __init__(self, dim, ffn_expansion_factor, bias):
@@ -509,15 +458,13 @@ class FeedForward(nn.Module):
         self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
 
     def forward(self, x):
-        x = self.project_in(x)  # (2,8,H,W) --> (2,32,H,W)
-        x1, x2 = self.dwconv(x).chunk(2, dim=1)  # (2,32,H,W) --> x1:(2,16,H,W), x2:(2,16,H,W)
-        x = F.gelu(x1) * x2  # (2,16,H,W) * (2,16,H,W) --> (2,16,H,W)
-        x = self.project_out(x)  # (2,16,H,W) --> (2,8,H,W)
+        x = self.project_in(x)
+        x1, x2 = self.dwconv(x).chunk(2, dim=1)
+        x = F.gelu(x1) * x2
+        x = self.project_out(x)
         return x
 
 
-##########################################################################
-## Multi-DConv Head Transposed Self-Attention (MDTA)
 class Attention(nn.Module):
 
     def __init__(self, dim, num_heads, bias):
@@ -542,28 +489,26 @@ class Attention(nn.Module):
         b, c, h, w = x.shape
         b, c, h2, w2 = y.shape
 
-        kv = self.kv_dwconv(self.kv(x))  # (B, 8, H, W) --> (B, 16, H, W)
-        k, v = kv.chunk(2, dim=1)  # (B, 16, H, W) --> k: (B, 8, H, W), v: (B, 8, H, W)
-        q = self.q_dwconv(self.q(y))  # (B, 8, 256, 256) --> (B, 8, 256, 256) --> (B, 8, 256, 256)
+        kv = self.kv_dwconv(self.kv(x))
+        k, v = kv.chunk(2, dim=1)
+        q = self.q_dwconv(self.q(y))
 
-        k = F.adaptive_avg_pool2d(k, (h2, w2))  # (B, 8, H, W) --> (B, 8, 256, 256) 确保与q的尺寸匹配
+        k = F.adaptive_avg_pool2d(k, (h2, w2))
 
         q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        #  对q,k,v维度重排 q,k: (B, 8, 256, 256) --> (B, 2, 4, 65536); v: (B, 8, H, W) --> (B, 2, 4, HW)
 
         q = torch.nn.functional.normalize(q, dim=-1)
         k = torch.nn.functional.normalize(k, dim=-1)
 
-        attn = q @ k.transpose(-2, -1)  # (B, 2, 4, 65536) @ (B, 2, 65536, 4) --> (B, 2, 4, 4)
-        attn = attn * self.temperature  # (B, 2, 4, 4) * (2, 1, 1) --> (B, 2, 4, 4)
+        attn = q @ k.transpose(-2, -1)
+        attn = attn * self.temperature
         attn = attn.softmax(dim=-1)
 
-        out = (attn @ v)  # (B, 2, 4, 4) @ (B, 2, 4, HW) --> (B, 2, 4, HW)
+        out = (attn @ v)
         out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
-        # (B, 2, 4, HW) --> (B, 8, H, W)
-        out = self.project_out(out)  # (B, 8, H, W) --> (B, 8, H, W)
+        out = self.project_out(out)
         return out
 
 
@@ -613,17 +558,14 @@ class TransformerBlock_Ours(nn.Module):
             up = F.interpolate(f, size=(256, 256), mode='bilinear', align_corners=False)
             up_feats.append(up)
         F_loc_cat = torch.cat(up_feats, dim=1)
-        # [(B, 32, 256, 256), (B, 16, 256, 256), (B, 8, 256, 256)] --> (B, 56, 256, 256)
-        F_loc = self.reduce_conv(F_loc_cat)  # (B, 56, 256, 256) --> (B, 8, 256, 256)
+        F_loc = self.reduce_conv(F_loc_cat)
 
-        F_loc = F.gelu(self.conv1(F_loc))  # (B,8,256,256) --> (B,8,256,256)
-        F_glo = F.gelu(self.conv2(F_glo))  # (B, 3, H, W) --> (B, 8, H, W)
+        F_loc = F.gelu(self.conv1(F_loc))
+        F_glo = F.gelu(self.conv2(F_glo))
         F_glo = self.norm1(F_glo)
         F_loc = self.norm1(F_loc)
 
-        # Cross-attention: fuse global context into global features
         F_glo = F_glo + self.attn(F_glo, F_loc)
-        # Apply channel attention
         F_glo = self.channel_attn(F_glo)
 
         F_out = F_glo + self.ffn(self.norm2(F_glo))
@@ -661,8 +603,8 @@ class AttentionGate(nn.Module):
 
     def forward(self, x):
         b, c, _, _ = x.shape
-        y = self.avg_pool(x).view(b, c)  # (B, 8, H, W) --> (B, 8)
-        y = self.fc(y).view(b, c, 1, 1)  # (B, 8) --> (B, 8, 1, 1)
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
         return x * y
 
 
@@ -678,31 +620,23 @@ class MultiScaleDetailExtractor(nn.Module):
         self.conv2 = SeparableConv2d(channels, channels)
         self.conv3 = SeparableConv2d(channels, channels)
 
-        # fuse 时将 3 路特征 concat 后降回 channels
         self.fuse = nn.Conv2d(channels * 3, channels, kernel_size=1, bias=False)
 
     def forward(self, x):
         B, C, H, W = x.shape
 
-        # 原尺度
-        x1 = self.conv1(x)  # (B, 8, H, W) --> (B, 8, H, W)
+        x1 = self.conv1(x)
 
-        # 1/2 尺度：下采样 → 提取 → 上采样到 (H,W)
-        y2 = self.conv2(self.pool1(x))   # (B, 8, H, W) --> (B, 8, ⌊H/2⌋, ⌊W/2⌋) --> (B, 8, ⌊H/2⌋, ⌊W/2⌋)
+        y2 = self.conv2(self.pool1(x))
         x2 = F.interpolate(y2, size=(H, W), mode='bilinear', align_corners=False)
-        # (B, 8, ⌊H/2⌋, ⌊W/2⌋) --> (B, 8, H, W)
 
-        # 1/4 尺度：同理
-        y3 = self.conv3(self.pool2(x))  # (B, 8, H, W) --> (B, 8, ⌊H/4⌋, ⌊W/4⌋) --> (B, 8, ⌊H/4⌋, ⌊W/4⌋)
+        y3 = self.conv3(self.pool2(x))
         x3 = F.interpolate(y3, size=(H, W), mode='bilinear', align_corners=False)
-        # (B, 8, ⌊H/4⌋, ⌊W/4⌋) --> (B, 8, H, W)
 
-        # 在空间维度 (H,W) 精确匹配后再拼接
-        out = self.fuse(torch.cat([x1, x2, x3], dim=1))  # (B, 24, H, W) --> (B, 8, H, W)
+        out = self.fuse(torch.cat([x1, x2, x3], dim=1))
         return out
 
 
-# —— 改进版细节恢复模块 —— #
 class DetailRecoveryModuleV2(nn.Module):
     """
     改进版细节恢复模块：
@@ -715,12 +649,10 @@ class DetailRecoveryModuleV2(nn.Module):
         super().__init__()
         self.extractor = MultiScaleDetailExtractor(channels)
         self.attn_gate = AttentionGate(channels)
-        # 控制细节增强强度，初始化为 0（恒等映射）
         self.strength = nn.Parameter(torch.zeros(1))
         self._init_identity()
 
     def _init_identity(self):
-        # 所有 Conv2d & Linear 权重初始化为 0，bias 亦为 0
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.constant_(m.weight, 0)
@@ -728,8 +660,8 @@ class DetailRecoveryModuleV2(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        detail = self.extractor(x)  # (B, 8, H, W) --> (B, 8, H, W)
-        gated = self.attn_gate(detail)  # (B, 8, H, W) --> (B, 8, H, W)
+        detail = self.extractor(x)
+        gated = self.attn_gate(detail)
         return x + self.strength * gated
 
 
@@ -758,7 +690,6 @@ class CoNet(nn.Module):
 
     def forward(self, img):
         img_unids = F.interpolate(img, size=(self.input_resolution,) * 2, mode='bilinear', align_corners=False)
-        # 图像分辨率变为256*256
         param_map, out_feature, loc_list = self.autoencoder(img_unids)
         img_input, grid = self.sampler(img=img)
         output_hr = self.lut(img_input, img)
@@ -767,7 +698,6 @@ class CoNet(nn.Module):
         return output
 
 
-# Backward-compatible name used by exposure_correction.py
 @ARCH_REGISTRY.register()
 class MSCDNet(CoNet):
     pass

@@ -41,7 +41,6 @@ class PairedResizeImageDataset(data.Dataset):
     def __init__(self, opt):
         super(PairedResizeImageDataset, self).__init__()
         self.opt = opt
-        # file client (io backend)
         self.file_client = None
         self.io_backend_opt = opt['io_backend']
         self.mean = opt['mean'] if 'mean' in opt else None
@@ -86,7 +85,6 @@ class PairedResizeImageDataset(data.Dataset):
             img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
 
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)
-        # normalize
         if self.mean is not None or self.std is not None:
             normalize(img_lq, self.mean, self.std, inplace=True)
             normalize(img_gt, self.mean, self.std, inplace=True)
