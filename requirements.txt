@@ -1,0 +1,5 @@
+# Inference dependencies, verified together on Python 3.12.4 and CPU.
+torch==2.10.0
+einops==0.8.2
+numpy==2.4.3
+opencv-python==4.13.0.92
